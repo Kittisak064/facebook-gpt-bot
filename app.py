@@ -1,24 +1,22 @@
 import os
 import requests
-from flask import Flask, request, jsonify
-from openai import OpenAI
+import openai
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+from flask import Flask, request
 
 app = Flask(__name__)
 
 # ==== CONFIG ====
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai.api_key = os.getenv("OPENAI_API_KEY")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_verify_token")
 SHEET_KEY = os.getenv("SHEET_KEY")
 
-if not OPENAI_API_KEY:
+if not openai.api_key:
     raise RuntimeError("❌ Missing OPENAI_API_KEY")
 if not SHEET_KEY:
     raise RuntimeError("❌ Missing SHEET_KEY")
-
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ==== Google Sheets (Secret Files: credentials.json) ====
 scope = [
@@ -44,7 +42,7 @@ def build_reply(user_text):
     ตอบลูกค้าอย่างสุภาพ กระชับ และตรงกับข้อมูล
     """
     try:
-        resp = client.chat.completions.create(
+        resp = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "คุณคือแอดมินร้าน"},
@@ -52,7 +50,7 @@ def build_reply(user_text):
             ],
             max_tokens=300
         )
-        return resp.choices[0].message.content.strip()
+        return resp["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return f"ขอโทษครับ เกิดข้อผิดพลาด: {e}"
 
