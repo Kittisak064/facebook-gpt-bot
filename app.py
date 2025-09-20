@@ -17,7 +17,7 @@ gs_client = gspread.authorize(creds)
 
 # ใช้ SHEET_ID จาก Environment Variable
 SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-sheet = gs_client.open_by_key(SHEET_ID).sheet1  # ดึงชีทแรก
+sheet = gs_client.open_by_key(SHEET_ID).FAQ  # ดึงชีทแรก
 
 @app.route("/", methods=["GET"])
 def home():
