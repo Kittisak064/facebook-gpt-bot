@@ -15,10 +15,8 @@ scope = ["https://spreadsheets.google.com/feeds",
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 gs_client = gspread.authorize(creds)
 
-# ใช้ SHEET_ID จาก Environment Variable
 SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-sheet = gs_client.open_by_key(1O4SOhp2JG-edaAWZZ7pwzL9uwm3F4Eif9jUeoFN7zu8).worksheet("FAQ")
-  # ดึงชีทแรก
+sheet = gs_client.open_by_key(SHEET_ID).worksheet("FAQ")
 
 @app.route("/", methods=["GET"])
 def home():
