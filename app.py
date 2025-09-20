@@ -2,180 +2,133 @@ import os
 import json
 import difflib
 from flask import Flask, request, jsonify
-import openai
+from openai import OpenAI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+import requests
 
 app = Flask(__name__)
 
-# -----------------------
-# Configuration (env vars)
-# -----------------------
-# Required env vars:
-# OPENAI_API_KEY        -> OpenAI API key
-# GOOGLE_CREDENTIALS_JSON -> (optional) full JSON string of service account key
-# SHEET_KEY             -> Google Sheet ID (the long id in sheet URL)
-# CREDENTIALS_PATH      -> optional path to JSON file (if you uploaded secret file). Default: "credentials.json"
-
+# ===============================
+# CONFIG
+# ===============================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SHEET_KEY = os.getenv("SHEET_KEY")
+SHEET_KEY = os.getenv("SHEET_KEY")  # Google Sheet ID
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_verify_token")
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 CREDENTIALS_PATH = os.getenv("CREDENTIALS_PATH", "credentials.json")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")  # optional
+GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 
 if not OPENAI_API_KEY:
-    raise RuntimeError("Missing OPENAI_API_KEY environment variable")
+    raise RuntimeError("❌ Missing OPENAI_API_KEY")
 if not SHEET_KEY:
-    raise RuntimeError("Missing SHEET_KEY environment variable")
+    raise RuntimeError("❌ Missing SHEET_KEY")
 
-openai.api_key = OPENAI_API_KEY
+# OpenAI
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# If user provided credentials JSON as env var, write it to file for gspread to use
+# ถ้าเก็บ service account json ใน env → เขียนไฟล์ออกมา
 if GOOGLE_CREDENTIALS_JSON:
     with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
         f.write(GOOGLE_CREDENTIALS_JSON)
 
-# Setup gspread client
+# ===============================
+# Google Sheets
+# ===============================
 scope = ["https://spreadsheets.google.com/feeds",
          "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_PATH, scope)
 gc = gspread.authorize(creds)
+sheet = gc.open_by_key(SHEET_KEY).sheet1
 
-# open sheet and cache header/rows
-def load_sheet_records():
-    sh = gc.open_by_key(SHEET_KEY)
-    sheet = sh.sheet1
-    records = sheet.get_all_records()  # list of dicts
-    # Expect sheet columns like: "question", "answer" (case-insensitive)
-    normalized = []
-    for r in records:
-        q = None
-        a = None
-        # find question & answer columns
+def load_faqs():
+    recs = sheet.get_all_records()
+    out = []
+    for r in recs:
+        q, a = None, None
         for k, v in r.items():
-            key_lower = k.strip().lower()
-            if key_lower in ("question", "q", "คำถาม"):
+            if str(k).strip().lower() in ("question", "q", "คำถาม"):
                 q = str(v).strip()
-            if key_lower in ("answer", "a", "response", "คำตอบ"):
+            if str(k).strip().lower() in ("answer", "a", "response", "คำตอบ"):
                 a = str(v).strip()
-        # fallback: if first column and second column
-        if q is None and len(r) >= 1:
-            # pick first non-empty column as question
-            for k2, v2 in r.items():
-                if str(v2).strip():
-                    q = str(v2).strip()
-                    break
-        if a is None and len(r) >= 2:
-            # pick second column as answer (best-effort)
-            seen = 0
-            for k2, v2 in r.items():
-                if seen == 0:
-                    seen += 1
-                    continue
-                if seen == 1:
-                    a = str(v2).strip()
-                    break
         if q:
-            normalized.append({"question": q, "answer": a or ""})
-    return normalized
+            out.append({"question": q, "answer": a or ""})
+    return out
 
-FAQ_CACHE = load_sheet_records()
+FAQ_CACHE = load_faqs()
 
-# Utility: find best match via difflib
-def find_best_answer(user_text, faqs, cutoff=0.6):
-    """
-    Return best matched answer (string) or None.
-    Uses difflib to compare the user_text with FAQ questions.
-    """
-    questions = [f["question"] for f in faqs]
-    if not questions:
-        return None, None
+def find_best_answer(user_text, cutoff=0.65):
+    questions = [f["question"] for f in FAQ_CACHE]
     matches = difflib.get_close_matches(user_text, questions, n=1, cutoff=cutoff)
     if matches:
-        best = matches[0]
-        idx = questions.index(best)
-        return faqs[idx]["answer"], best
-    # fallback: check substring
-    lower = user_text.lower()
-    for f in faqs:
-        if f["question"].lower() in lower or lower in f["question"].lower():
-            return f["answer"], f["question"]
-    return None, None
+        q = matches[0]
+        idx = questions.index(q)
+        return FAQ_CACHE[idx]["answer"]
+    return None
 
-# Use OpenAI to generate reply using sheet context
-def openai_reply(user_text, faqs, max_tokens=400):
-    # Prepare few-shot context: include some top FAQ Q/A pairs to guide the model
-    sample_pairs = []
-    for i, f in enumerate(faqs[:8]):  # include up to 8 pairs
-        q = f["question"]
-        a = f["answer"] or "ไม่มีคำตอบที่ให้ไว้"
-        sample_pairs.append(f"Q: {q}\nA: {a}")
-    context = "\n\n".join(sample_pairs)
+def gpt_reply(user_text):
+    context = "\n".join([f"Q: {f['question']}\nA: {f['answer']}" for f in FAQ_CACHE[:8]])
+    user_msg = f"""ลูกค้าถาม: {user_text}
 
-    system_msg = (
-        "คุณเป็นแอดมินร้าน ช่วยตอบลูกค้าอย่างสุภาพและกระชับ หากคำถามตรงกับข้อมูลใน 'FAQ' ให้ใช้คำตอบนั้นก่อน"
-    )
-    user_prompt = f"""ลูกค้าถาม: {user_text}
-
-นี่คือข้อมูลจาก Google Sheet (FAQ) — โปรดใช้เป็นข้อมูลอ้างอิง:
+FAQ:
 {context}
 
-ถ้าตรงกับ FAQ ให้ตอบตาม FAQ ถ้าไม่ ให้ตอบด้วยความช่วยเหลือทั่วไป (กระชับ) และไม่สร้างข้อมูลเท็จ
-"""
-    try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # ถ้าไม่มีสิทธิ์ เปลี่ยนเป็น "gpt-4o" หรือ "gpt-3.5-turbo"
-            messages=[
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_prompt}
-            ],
-            max_tokens=max_tokens,
-            temperature=0.2,
-        )
-        text = resp.choices[0].message["content"].strip()
-        return text
-    except Exception as e:
-        # fallback small reply
-        return "ขอโทษครับ เกิดปัญหาในการเรียก GPT ตอนนี้ โปรดลองอีกครั้งภายหลัง."
+ตอบสั้นๆ สุภาพ อิงข้อมูลจริงจาก FAQ ถ้ามี"""
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role":"system","content":"คุณคือแอดมินร้าน"},
+            {"role":"user","content": user_msg}
+        ],
+        temperature=0.2,
+        max_tokens=300
+    )
+    return resp.choices[0].message.content.strip()
+
+def build_reply(user_text):
+    ans = find_best_answer(user_text)
+    if ans and ans.strip():
+        return ans
+    return gpt_reply(user_text)
+
+# ===============================
+# ROUTES
+# ===============================
+@app.route("/")
+def home():
+    return "✅ Bot is running!"
 
 @app.route("/manychat", methods=["POST"])
 def manychat():
-    """
-    Expected request JSON from ManyChat (minimum):
-    { "text": "user message", "user_id": "subscriber id" }
-
-    Response MUST be JSON, e.g.
-    { "reply": "ข้อความที่ต้องการให้ ManyChat เก็บ/ส่ง" }
-    """
     data = request.get_json(silent=True) or {}
-    user_text = None
-    # ManyChat body will depend on how you configured body in the External Request step.
-    # We'll try common keys:
-    if isinstance(data, dict):
-        user_text = data.get("text") or data.get("message") or data.get("body") or data.get("input")
-    if not user_text and request.form:
-        # fallback to form field
-        user_text = request.form.get("text")
+    user_text = data.get("text") or ""
     if not user_text:
-        # nothing to do
-        return jsonify({"reply": "ผมไม่เห็นข้อความที่ส่งมา — กรุณาส่งค่า 'text' ใน body ของ request"}), 200
+        return jsonify({"reply":"❌ No text received"}), 200
+    return jsonify({"reply": build_reply(user_text)}), 200
 
-    # Try to find in FAQ
-    answer, matched_q = find_best_answer(user_text, FAQ_CACHE, cutoff=0.6)
-    if answer:
-        reply_text = answer
-        # if answer empty, fallback to openai
-        if not reply_text.strip():
-            reply_text = openai_reply(user_text, FAQ_CACHE)
-    else:
-        # not found -> call OpenAI to generate
-        reply_text = openai_reply(user_text, FAQ_CACHE)
+@app.route("/webhook", methods=["GET"])
+def fb_verify():
+    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
+        return request.args.get("hub.challenge")
+    return "Token mismatch", 403
 
-    # Return JSON with field "reply" for ManyChat response mapping
-    return jsonify({"reply": reply_text}), 200
-
-@app.route("/", methods=["GET"])
-def home():
-    return "Facebook GPT bot (ManyChat endpoint) running"
+@app.route("/webhook", methods=["POST"])
+def fb_webhook():
+    data = request.get_json(silent=True) or {}
+    for entry in data.get("entry", []):
+        for msg in entry.get("messaging", []):
+            if "message" in msg and "text" in msg["message"]:
+                sender = msg["sender"]["id"]
+                reply = build_reply(msg["message"]["text"])
+                if PAGE_ACCESS_TOKEN:
+                    requests.post(
+                        "https://graph.facebook.com/v20.0/me/messages",
+                        params={"access_token": PAGE_ACCESS_TOKEN},
+                        json={"recipient": {"id": sender},
+                              "message": {"text": reply}}
+                    )
+    return "ok", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
