@@ -1,11 +1,11 @@
 import os
 import json
 import difflib
+import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-import requests
 
 app = Flask(__name__)
 
@@ -25,10 +25,9 @@ if not OPENAI_API_KEY:
 if not SHEET_KEY:
     raise RuntimeError("❌ Missing SHEET_KEY")
 
-# OpenAI
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ถ้าเก็บ service account json ใน env → เขียนไฟล์ออกมา
+# ถ้าใส่ไฟล์ json key ไว้ใน Environment
 if GOOGLE_CREDENTIALS_JSON:
     with open(CREDENTIALS_PATH, "w", encoding="utf-8") as f:
         f.write(GOOGLE_CREDENTIALS_JSON)
@@ -69,22 +68,25 @@ def find_best_answer(user_text, cutoff=0.65):
 
 def gpt_reply(user_text):
     context = "\n".join([f"Q: {f['question']}\nA: {f['answer']}" for f in FAQ_CACHE[:8]])
-    user_msg = f"""ลูกค้าถาม: {user_text}
+    prompt = f"""ลูกค้าถาม: {user_text}
 
 FAQ:
 {context}
 
 ตอบสั้นๆ สุภาพ อิงข้อมูลจริงจาก FAQ ถ้ามี"""
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role":"system","content":"คุณคือแอดมินร้าน"},
-            {"role":"user","content": user_msg}
-        ],
-        temperature=0.2,
-        max_tokens=300
-    )
-    return resp.choices[0].message.content.strip()
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "คุณคือแอดมินร้าน"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=300
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"ขอโทษครับ ระบบขัดข้อง: {e}"
 
 def build_reply(user_text):
     ans = find_best_answer(user_text)
@@ -104,7 +106,7 @@ def manychat():
     data = request.get_json(silent=True) or {}
     user_text = data.get("text") or ""
     if not user_text:
-        return jsonify({"reply":"❌ No text received"}), 200
+        return jsonify({"reply": "❌ No text received"}), 200
     return jsonify({"reply": build_reply(user_text)}), 200
 
 @app.route("/webhook", methods=["GET"])
@@ -125,8 +127,10 @@ def fb_webhook():
                     requests.post(
                         "https://graph.facebook.com/v20.0/me/messages",
                         params={"access_token": PAGE_ACCESS_TOKEN},
-                        json={"recipient": {"id": sender},
-                              "message": {"text": reply}}
+                        json={
+                            "recipient": {"id": sender},
+                            "message": {"text": reply}
+                        }
                     )
     return "ok", 200
 
