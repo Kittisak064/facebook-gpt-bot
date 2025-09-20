@@ -1,66 +1,26 @@
 import os
-import requests
-import openai
+from flask import Flask, request, jsonify
+from openai import OpenAI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from flask import Flask, request
-
-app = Flask(__name__)
 
 # ==== CONFIG ====
-openai.api_key = os.getenv("OPENAI_API_KEY")
+app = Flask(__name__)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # ดึง API Key จาก Render
+
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_verify_token")
-SHEET_KEY = os.getenv("SHEET_KEY")
 
-if not openai.api_key:
-    raise RuntimeError("❌ Missing OPENAI_API_KEY")
-if not SHEET_KEY:
-    raise RuntimeError("❌ Missing SHEET_KEY")
+# ==== GOOGLE SHEETS ====
+scope = ["https://spreadsheets.google.com/feeds",
+         "https://www.googleapis.com/auth/drive"]
 
-# ==== Google Sheets (Secret Files: credentials.json) ====
-scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
-]
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
-gc = gspread.authorize(creds)
-sheet = gc.open_by_key(SHEET_KEY).sheet1
+gs_client = gspread.authorize(creds)
+sheet = gs_client.open_by_key("YOUR_SHEET_ID").sheet1
+# 👉 เปลี่ยน "YOUR_SHEET_ID" เป็น ID ชีทของพี่
 
-
-def get_faqs():
-    return sheet.get_all_records()
-
-
-def build_reply(user_text):
-    faqs = get_faqs()
-    prompt = f"""
-    ลูกค้าถาม: {user_text}
-    นี่คือข้อมูลจาก Google Sheet:
-    {faqs}
-
-    ตอบลูกค้าอย่างสุภาพ กระชับ และตรงกับข้อมูล
-    """
-    try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "คุณคือแอดมินร้าน"},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300
-        )
-        return resp["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"ขอโทษครับ เกิดข้อผิดพลาด: {e}"
-
-
-# ==== ROUTES ====
-@app.route("/")
-def home():
-    return "✅ Bot is running!"
-
-
+# ==== WEBHOOK VERIFY (Facebook) ====
 @app.route("/webhook", methods=["GET"])
 def verify():
     token_sent = request.args.get("hub.verify_token")
@@ -68,7 +28,7 @@ def verify():
         return request.args.get("hub.challenge")
     return "Invalid verification token"
 
-
+# ==== FACEBOOK MESSAGE WEBHOOK ====
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
@@ -78,9 +38,30 @@ def webhook():
                 sender_id = msg["sender"]["id"]
                 user_msg = msg["message"]["text"]
 
-                reply = build_reply(user_msg)
+                # --- ดึงข้อมูลจาก Google Sheet ---
+                faqs = sheet.get_all_records()
 
-                # ส่งข้อความกลับไปที่ Facebook
+                # --- ส่งไปหา GPT ---
+                prompt = f"""
+                ลูกค้าถาม: {user_msg}
+                นี่คือข้อมูลร้านจาก Google Sheet:
+                {faqs}
+
+                ตอบลูกค้าอย่างสุภาพ กระชับ และไม่มั่ว
+                """
+
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "คุณคือแอดมินร้านที่ตอบลูกค้า"},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+
+                reply = response.choices[0].message.content
+
+                # --- ส่งกลับไปยัง Facebook ---
+                import requests
                 requests.post(
                     "https://graph.facebook.com/v20.0/me/messages",
                     params={"access_token": PAGE_ACCESS_TOKEN},
@@ -91,6 +72,37 @@ def webhook():
                 )
     return "ok", 200
 
+# ==== MANYCHAT ENDPOINT (ถ้าใช้ ManyChat) ====
+@app.route("/manychat", methods=["POST"])
+def manychat():
+    data = request.get_json()
+    user_msg = data.get("text", "")
+
+    # --- ดึงข้อมูลจาก Google Sheet ---
+    faqs = sheet.get_all_records()
+
+    prompt = f"""
+    ลูกค้าถาม: {user_msg}
+    นี่คือข้อมูลร้านจาก Google Sheet:
+    {faqs}
+
+    ตอบลูกค้าอย่างสุภาพ กระชับ และไม่มั่ว
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "คุณคือแอดมินร้านที่ตอบลูกค้า"},
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    reply = response.choices[0].message.content
+    return jsonify({"reply": reply})
+
+@app.route("/")
+def home():
+    return "✅ Facebook GPT Bot is running with new OpenAI API!"
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+    app.run(host="0.0.0.0", port=5000)
