@@ -17,7 +17,7 @@ scope = ["https://spreadsheets.google.com/feeds",
          "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 client = gspread.authorize(creds)
-sheet = client.open("FAQ").sheet1   # เปลี่ยนชื่อเป็นชื่อ Google Sheet ของคุณ
+sheet = client.open("1O4SOhp2JG-edaAWZZ7pwzL9uwm3F4Eif9jUeoFN7zu8").sheet1   # เปลี่ยนชื่อเป็นชื่อ Google Sheet ของคุณ
 
 # ==== Webhook Verify ====
 @app.route("/webhook", methods=["GET"])
