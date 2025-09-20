@@ -76,3 +76,32 @@ def home():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
+
+@app.route("/manychat", methods=["POST"])
+def manychat():
+    data = request.json
+    user_msg = data.get("text", "")
+
+    faqs = sheet.get_all_records()
+
+    prompt = f"""
+    ลูกค้าถาม: {user_msg}
+    นี่คือข้อมูลร้านจาก Google Sheet:
+    {faqs}
+
+    ตอบลูกค้าอย่างสุภาพ กระชับ และไม่มั่ว
+    """
+
+    gpt_response = openai.ChatCompletion.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "คุณคือแอดมินร้าน"},
+            {"role": "user", "content": prompt}
+        ]
+    )
+
+    reply = gpt_response.choices[0].message["content"]
+
+    return {"text": reply}
+
