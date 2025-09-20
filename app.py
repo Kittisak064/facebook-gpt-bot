@@ -1,108 +1,89 @@
-import os
 from flask import Flask, request, jsonify
 from openai import OpenAI
+import os
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# ==== CONFIG ====
 app = Flask(__name__)
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # ดึง API Key จาก Render
 
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "my_verify_token")
+# ==== OpenAI Client ====
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ==== GOOGLE SHEETS ====
+# ==== Google Sheets ====
 scope = ["https://spreadsheets.google.com/feeds",
          "https://www.googleapis.com/auth/drive"]
-
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 gs_client = gspread.authorize(creds)
-sheet = gs_client.open_by_key("YOUR_SHEET_ID").sheet1
-# 👉 เปลี่ยน "YOUR_SHEET_ID" เป็น ID ชีทของพี่
 
-# ==== WEBHOOK VERIFY (Facebook) ====
-@app.route("/webhook", methods=["GET"])
-def verify():
-    token_sent = request.args.get("hub.verify_token")
-    if token_sent == VERIFY_TOKEN:
-        return request.args.get("hub.challenge")
-    return "Invalid verification token"
+# ใช้ SHEET_ID จาก Environment Variable
+SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+sheet = gs_client.open_by_key(SHEET_ID).sheet1  # ดึงชีทแรก
 
-# ==== FACEBOOK MESSAGE WEBHOOK ====
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    for entry in data.get("entry", []):
-        for msg in entry.get("messaging", []):
-            if "message" in msg and "text" in msg["message"]:
-                sender_id = msg["sender"]["id"]
-                user_msg = msg["message"]["text"]
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ FAQ Bot is running with Google Sheets", 200
 
-                # --- ดึงข้อมูลจาก Google Sheet ---
-                faqs = sheet.get_all_records()
 
-                # --- ส่งไปหา GPT ---
-                prompt = f"""
-                ลูกค้าถาม: {user_msg}
-                นี่คือข้อมูลร้านจาก Google Sheet:
-                {faqs}
-
-                ตอบลูกค้าอย่างสุภาพ กระชับ และไม่มั่ว
-                """
-
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "คุณคือแอดมินร้านที่ตอบลูกค้า"},
-                        {"role": "user", "content": prompt}
-                    ]
-                )
-
-                reply = response.choices[0].message.content
-
-                # --- ส่งกลับไปยัง Facebook ---
-                import requests
-                requests.post(
-                    "https://graph.facebook.com/v20.0/me/messages",
-                    params={"access_token": PAGE_ACCESS_TOKEN},
-                    json={
-                        "recipient": {"id": sender_id},
-                        "message": {"text": reply}
-                    }
-                )
-    return "ok", 200
-
-# ==== MANYCHAT ENDPOINT (ถ้าใช้ ManyChat) ====
 @app.route("/manychat", methods=["POST"])
 def manychat():
-    data = request.get_json()
-    user_msg = data.get("text", "")
+    try:
+        data = request.get_json(silent=True) or {}
+        user_message = data.get("message", "").strip()
 
-    # --- ดึงข้อมูลจาก Google Sheet ---
-    faqs = sheet.get_all_records()
+        if not user_message:
+            return jsonify({"reply": "⚠️ ไม่พบข้อความจากผู้ใช้"}), 400
 
-    prompt = f"""
-    ลูกค้าถาม: {user_msg}
-    นี่คือข้อมูลร้านจาก Google Sheet:
-    {faqs}
+        # ดึงข้อมูลทั้งหมดจากชีท
+        records = sheet.get_all_records()
 
-    ตอบลูกค้าอย่างสุภาพ กระชับ และไม่มั่ว
-    """
+        matched_keyword = None
+        faqs = []
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "คุณคือแอดมินร้านที่ตอบลูกค้า"},
-            {"role": "user", "content": prompt}
-        ]
-    )
+        # วนหาคีย์เวิร์ด (รองรับหลายคีย์เวิร์ดใน 1 ช่อง โดยคั่นด้วย , หรือ ช่องว่าง)
+        for row in records:
+            keywords = str(row["คีย์เวิร์ด"]).replace(" ", "").split(",")
+            for kw in keywords:
+                if kw and kw in user_message:
+                    matched_keyword = kw
+                    faqs = [r for r in records if kw in str(r["คีย์เวิร์ด"])]
+                    break
+            if matched_keyword:
+                break
 
-    reply = response.choices[0].message.content
-    return jsonify({"reply": reply})
+        if matched_keyword and faqs:
+            # สร้าง FAQ เฉพาะสินค้านั้น
+            faq_text = "\n".join([
+                f"Q: {r['คำถาม']} | A: {r['คำตอบ']}" for r in faqs
+            ])
 
-@app.route("/")
-def home():
-    return "✅ Facebook GPT Bot is running with new OpenAI API!"
+            prompt = f"""
+            ลูกค้าถาม: {user_message}
+            นี่คือ FAQ ของสินค้า [{matched_keyword}]:
+            {faq_text}
+
+            ตอบลูกค้าอย่างสุภาพ เป็นกันเอง ใส่อีโมจินิดหน่อย 😊 ใช้ข้อมูลจาก FAQ เท่านั้น
+            """
+
+            resp = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "คุณคือผู้ช่วยร้านค้า พูดสุภาพ อธิบายง่าย ใส่อีโมจิเล็กน้อย"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.4,
+                max_tokens=400
+            )
+            reply_text = resp.choices[0].message.content.strip()
+
+        else:
+            # ถ้ายังจับคีย์เวิร์ดไม่ได้
+            reply_text = "คุณสนใจสินค้าไหนครับ 😊 เช่น ไฟเซ็นเซอร์ หม้อหุงข้าว หรือปลั๊กไฟ?"
+
+        return jsonify({"reply": reply_text})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
