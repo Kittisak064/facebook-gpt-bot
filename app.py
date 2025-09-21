@@ -31,7 +31,14 @@ def manychat():
         user_message = data.get("message", "").strip()
 
         if not user_message:
-            return jsonify({"reply": "⚠️ ไม่พบข้อความจากผู้ใช้"}), 400
+            return jsonify({
+                "version": "v2",
+                "content": {
+                    "messages": [
+                        {"type": "text", "text": "⚠️ ไม่พบข้อความจากผู้ใช้"}
+                    ]
+                }
+            }), 200
 
         # ดึงข้อมูลทั้งหมดจากชีท (3 คอลัมน์: คำถาม | คำตอบ | คีย์เวิร์ด)
         records = sheet.get_all_records()
@@ -39,7 +46,6 @@ def manychat():
         matched_keyword = None
         faqs = []
 
-        # วนหาคีย์เวิร์ด (รองรับหลายคีย์เวิร์ดใน 1 ช่อง โดยคั่นด้วย , หรือ เว้นวรรค)
         for row in records:
             keywords = str(row["คีย์เวิร์ด"]).replace(" ", "").split(",")
             for kw in keywords:
@@ -51,7 +57,6 @@ def manychat():
                 break
 
         if matched_keyword and faqs:
-            # รวม FAQ ของสินค้านั้น
             faq_text = "\n".join([
                 f"Q: {r['คำถาม']} | A: {r['คำตอบ']}" for r in faqs
             ])
@@ -78,18 +83,24 @@ def manychat():
         else:
             reply_text = "คุณสนใจสินค้าไหนครับ 😊 เช่น ไฟเซ็นเซอร์ หม้อหุงข้าว หรือปลั๊กไฟ?"
 
-        print("REPLY >>>", reply_text)  # debug log
+        # ✅ Return ในรูปแบบ ManyChat
         return jsonify({
-            "success": True,
-            "reply": reply_text
+            "version": "v2",
+            "content": {
+                "messages": [
+                    {"type": "text", "text": reply_text}
+                ]
+            }
         }), 200
 
     except Exception as e:
-        print("ERROR >>>", str(e))
         return jsonify({
-            "success": False,
-            "reply": "⚠️ มีข้อผิดพลาด กรุณาลองใหม่อีกครั้ง",
-            "error": str(e)
+            "version": "v2",
+            "content": {
+                "messages": [
+                    {"type": "text", "text": f"⚠️ เกิดข้อผิดพลาด: {str(e)}"}
+                ]
+            }
         }), 200
 
 
