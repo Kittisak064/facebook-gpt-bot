@@ -1,97 +1,141 @@
 from flask import Flask, request, jsonify
 from openai import OpenAI
 import os
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from difflib import SequenceMatcher
+import re
 
 app = Flask(__name__)
 
 # ==== OpenAI Client ====
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ==== Google Sheets API ====
-SERVICE_ACCOUNT_FILE = "credentials.json"  # ไฟล์ service account
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+# ==== Google Sheets ====
+scope = ["https://spreadsheets.google.com/feeds",
+         "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+gs_client = gspread.authorize(creds)
 
-creds = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES
-)
+# ใช้ SHEET_ID จาก Environment Variable
+SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
+sheet = gs_client.open_by_key(SHEET_ID).worksheet("FAQ")  # คอลัมน์: ชื่อสินค้า | คำตอบ | คีย์เวิร์ด
 
-SHEET_ID = os.getenv("GOOGLE_SHEET_ID")  # ตั้งใน Render หรือ local env
-SHEET_NAME = "FAQ"
+def _norm(s: str) -> str:
+    # normalize เพื่อให้จับใกล้เคียงดีขึ้น (ตัดช่องว่าง/ตัวพิเศษ + ตัวพิมพ์เล็ก)
+    return re.sub(r"\s+", "", str(s)).lower()
 
-service = build("sheets", "v4", credentials=creds)
-sheet = service.spreadsheets()
-
-def get_faq_records():
-    """ดึงข้อมูลทั้งหมดจากชีท FAQ"""
-    result = sheet.values().get(
-        spreadsheetId=SHEET_ID,
-        range=SHEET_NAME
-    ).execute()
-
-    values = result.get("values", [])
-    if not values or len(values) < 2:
-        return []
-
-    headers = values[0]
-    records = [dict(zip(headers, row)) for row in values[1:]]
-    return records
-
+def _gpt_followup(user_message: str) -> str:
+    # ถ้าไม่เจอคีย์เวิร์ด ให้ GPT แต่งประโยคชวนให้บอกชื่อสินค้า (ไม่พูดซ้ำ)
+    prompt = f"""
+ลูกค้าพิมพ์: "{user_message}"
+งานของคุณ: เป็นพนักงานขายร้านค้าออนไลน์ ตอบกลับสั้น ๆ (1-2 ประโยค)
+- ชวนให้ลูกค้าบอกชื่อสินค้าที่สนใจ
+- สุภาพ เป็นกันเอง ใส่อีโมจิเล็กน้อย
+- ตัวอย่างสินค้า: ไฟเซ็นเซอร์, หม้อหุงข้าว, ปลั๊กไฟ
+"""
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "คุณคือพนักงานขายออนไลน์ พูดสุภาพ เป็นกันเอง กระตุ้นให้ลูกค้าพิมพ์ชื่อสินค้า"},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.8,
+            max_tokens=120
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception:
+        return "คุณสนใจสินค้าไหนครับ 😊 บอกชื่อสินค้าได้ไหมครับ"
 
 @app.route("/", methods=["GET"])
 def home():
-    return "✅ FAQ Bot is running with Google Sheets API", 200
-
+    return "✅ FAQ Bot is running with Google Sheets", 200
 
 @app.route("/manychat", methods=["POST"])
 def manychat():
     try:
         data = request.get_json(silent=True) or {}
-        user_message = data.get("message", "").strip()
+        user_message = (data.get("message") or "").strip()
 
         if not user_message:
             return jsonify({
                 "content": {"messages": [{"text": "⚠️ ไม่พบข้อความจากผู้ใช้"}]}
             }), 200
 
-        # ดึงข้อมูลจาก Google Sheets
-        records = get_faq_records()
+        records = sheet.get_all_records()  # ต้องมี header: ชื่อสินค้า | คำตอบ | คีย์เวิร์ด
+        u = _norm(user_message)
 
-        matched = []
+        # สแกนหา match (ตรง/ใกล้เคียง) ต่อ 1 แถวสินค้า
+        candidates = []  # [{"name": str, "link": str, "score": float}]
         for row in records:
-            keywords = str(row.get("คีย์เวิร์ด", "")).replace(" ", "").split(",")
-            for kw in keywords:
-                if kw and kw in user_message:
-                    matched.append(row)
+            name = str(row.get("ชื่อสินค้า", "")).strip()
+            link = str(row.get("คำตอบ", "")).strip()
+            kw_raw = str(row.get("คีย์เวิร์ด", ""))
+            kws = [k.strip() for k in kw_raw.split(",") if k.strip()]
+            # รวม "ชื่อสินค้า" เข้าไปเป็นคีย์เวิร์ดด้วย เพื่อให้ลูกค้าพิมพ์ชื่อเต็มแล้วเจอ
+            kws_plus = list(set(kws + ([name] if name else [])))
+
+            best = 0.0
+            direct_hit = False
+            for kw in kws_plus:
+                if not kw:
+                    continue
+                # ตรงแบบ contains ก่อน (แรงสุด)
+                if _norm(kw) in u or kw.lower() in user_message.lower():
+                    direct_hit = True
+                    best = 1.0
                     break
+                # ไม่ตรง → วัดใกล้เคียง
+                score = SequenceMatcher(None, u, _norm(kw)).ratio()
+                if score > best:
+                    best = score
 
-        if matched:
-            # ถ้าเจอสินค้าเดียว → ส่งคำตอบเลย
-            if len(matched) == 1:
-                product = matched[0]["ชื่อสินค้า"]
-                answer = matched[0]["คำตอบ"]
-                reply_text = f"ได้เลยครับ 🙌 สั่งซื้อ {product} ได้ที่นี่เลย 👉 {answer}"
+            # เกณฑ์ผ่าน: ตรงเลย หรือ ใกล้เคียง >= 0.72 (ปรับได้)
+            if direct_hit or best >= 0.72:
+                candidates.append({"name": name or (kws_plus[0] if kws_plus else "สินค้านี้"),
+                                   "link": link, "score": best})
 
+        # ตัดสินใจจาก candidates
+        if len(candidates) == 0:
+            # ไม่เจออะไรเลย → ให้ GPT ชวนบอกชื่อสินค้า
+            reply_text = _gpt_followup(user_message)
+
+        elif len(candidates) == 1:
+            # เจอชัดเจน 1 ชิ้น → ส่งลิงก์ด้วยประโยคสุภาพ
+            c = candidates[0]
+            pname = c["name"]
+            link = c["link"] or ""
+            if not link:
+                reply_text = f"สนใจ {pname} ใช่ไหมครับ 😊 เดี๋ยวผมส่งรายละเอียดให้เพิ่มเติมนะครับ"
             else:
-                # ถ้ามีหลายสินค้า → ให้ลูกค้าเลือก
-                product_list = "\n".join([f"- {m['ชื่อสินค้า']}" for m in matched])
-                reply_text = f"สินค้าที่เกี่ยวข้องกับคำค้นนี้มีหลายรายการครับ 😊\n{product_list}\n\nกรุณาพิมพ์ชื่อเต็มของสินค้าที่คุณสนใจครับ 🙏"
+                reply_text = f"ได้เลยครับ 🙌 สั่งซื้อ {pname} ได้ที่นี่เลยครับ 👉 {link}"
 
         else:
-            # ถ้าไม่เจอคีย์เวิร์ด
-            reply_text = "คุณสนใจสินค้าไหนครับ 😊 เช่น ปลั๊กไฟติดผนัง หรือ โจ๊กถุง?"
+            # เจอหลายชิ้น → ให้ลูกค้าเลือกชื่อสินค้า (พิมพ์ชื่อเต็มหรือใกล้เคียง)
+            # เรียงตาม score มาก → น้อย แล้วโชว์ top 5 พอ
+            candidates.sort(key=lambda x: x["score"], reverse=True)
+            names = [c["name"] for c in candidates[:5]]
+            bullet = "\n".join([f"- {n}" for n in names])
+            reply_text = (
+                "เกี่ยวกับคำนี้ เรามีหลายตัวเลือกครับ 😊\n"
+                f"{bullet}\n\n"
+                "พิมพ์ชื่อสินค้า (เต็มหรือใกล้เคียง) ที่ต้องการ แล้วผมจะส่งลิงก์ให้เลยครับ 🙏"
+            )
 
-        # ✅ ส่งกลับไป ManyChat
+        # ส่งกลับรูปแบบ ManyChat
         return jsonify({
-            "content": {"messages": [{"text": reply_text}]}
+            "content": {
+                "messages": [{"text": reply_text}]
+            }
         }), 200
 
     except Exception as e:
         return jsonify({
-            "content": {"messages": [{"text": f"⚠️ มีข้อผิดพลาด: {str(e)}"}]}
+            "content": {
+                "messages": [{"text": f"⚠️ มีข้อผิดพลาด: {str(e)}"}]
+            }
         }), 200
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
