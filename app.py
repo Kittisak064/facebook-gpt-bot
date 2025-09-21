@@ -2,18 +2,19 @@ from flask import Flask, request, jsonify
 from openai import OpenAI
 import os
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-from fuzzywuzzy import fuzz  # ใช้จับคีย์เวิร์ดใกล้เคียง
+from google.oauth2.service_account import Credentials
+from fuzzywuzzy import fuzz  # ใช้สำหรับจับคำใกล้เคียง
 
 app = Flask(__name__)
 
 # ==== OpenAI Client ====
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ==== Google Sheets ====
-scope = ["https://spreadsheets.google.com/feeds",
+# ==== Google Sheets Auth (ใช้ google-auth แทน oauth2client) ====
+scope = ["https://www.googleapis.com/auth/spreadsheets",
          "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
+
+creds = Credentials.from_service_account_file("credentials.json", scopes=scope)
 gs_client = gspread.authorize(creds)
 
 # ใช้ SHEET_ID จาก Environment Variable
@@ -22,7 +23,7 @@ sheet = gs_client.open_by_key(SHEET_ID).worksheet("FAQ")  # ต้องมี�
 
 @app.route("/", methods=["GET"])
 def home():
-    return "✅ FAQ Bot is running with Google Sheets", 200
+    return "✅ FAQ Bot is running with Google Sheets (auth fixed)", 200
 
 
 @app.route("/manychat", methods=["POST"])
@@ -41,40 +42,41 @@ def manychat():
 
         matched_products = []
 
-        # 🔍 ตรวจหาคีย์เวิร์ด (รองรับหลายคำ, รองรับพิมพ์ผิดเล็กน้อย)
+        # 🔍 ตรวจหาคีย์เวิร์ด (รองรับพิมพ์ผิดเล็กน้อย)
         for row in records:
             keywords = str(row["คีย์เวิร์ด"]).split(",")
             for kw in keywords:
                 kw = kw.strip()
                 if not kw:
                     continue
-                # ตรงเป๊ะ หรือ ใกล้เคียง
                 if kw in user_message or fuzz.partial_ratio(kw, user_message) > 80:
                     matched_products.append(row)
                     break
 
         if len(matched_products) == 1:
-            # ตรงกับสินค้าเดียว
+            # เจอสินค้าเดียว
             product = matched_products[0]
             product_name = product["ชื่อสินค้า"]
             product_answer = product["คำตอบ"]
 
-            reply_text = f"สำหรับ {product_name} นะครับ 😊\n{product_answer}"
+            reply_text = f"ได้เลยครับ 🙌 {product_name}\n👉 {product_answer}"
 
         elif len(matched_products) > 1:
-            # มีหลายสินค้าที่ตรง ให้ลูกค้าเลือก
+            # เจอหลายสินค้า
             product_names = [r["ชื่อสินค้า"] for r in matched_products]
             reply_text = (
-                f"ตอนนี้เรามีสินค้าที่เกี่ยวข้องหลายรายการเลยครับ 👇\n"
+                f"ตอนนี้เรามีสินค้าที่เกี่ยวข้องหลายรายการครับ 👇\n"
                 + "\n".join([f"- {name}" for name in product_names])
                 + "\n\nคุณสนใจตัวไหนครับ? พิมพ์ชื่อเต็มหรือใกล้เคียงได้เลยนะ 😊"
             )
 
         else:
-            # ไม่เจออะไรเลย → ถามกลับ
-            reply_text = "คุณสนใจสินค้าไหนครับ 😊 เช่น ไฟเซ็นเซอร์ หม้อหุงข้าว หรือปลั๊กไฟ?"
+            # ไม่เจออะไร
+            reply_text = (
+                "คุณสนใจสินค้าไหนครับ 😊 "
+                "เช่น ไฟเซ็นเซอร์ หม้อหุงข้าว หรือปลั๊กไฟ?"
+            )
 
-        # ✅ ส่งกลับแบบ ManyChat รองรับ
         return jsonify({
             "content": {"messages": [{"text": reply_text}]}
         }), 200
