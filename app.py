@@ -17,7 +17,7 @@ gs_client = gspread.authorize(creds)
 
 # ใช้ SHEET_ID จาก Environment Variable
 SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-sheet = gs_client.open_by_key(SHEET_ID).worksheet("FAQ")  # ต้องมีชีทชื่อ FAQ ใน Google Sheet
+sheet = gs_client.open_by_key(SHEET_ID).worksheet("FAQ")  # ต้องมีชีทชื่อ FAQ
 
 @app.route("/", methods=["GET"])
 def home():
@@ -32,20 +32,18 @@ def manychat():
 
         if not user_message:
             return jsonify({
-                "version": "v2",
                 "content": {
-                    "messages": [
-                        {"type": "text", "text": "⚠️ ไม่พบข้อความจากผู้ใช้"}
-                    ]
+                    "messages": [{"text": "⚠️ ไม่พบข้อความจากผู้ใช้"}]
                 }
             }), 200
 
-        # ดึงข้อมูลทั้งหมดจากชีท (3 คอลัมน์: คำถาม | คำตอบ | คีย์เวิร์ด)
+        # ดึงข้อมูลจากชีท (3 คอลัมน์: คำถาม | คำตอบ | คีย์เวิร์ด)
         records = sheet.get_all_records()
 
         matched_keyword = None
         faqs = []
 
+        # หาคีย์เวิร์ด (รองรับหลายคำคั่นด้วย ,)
         for row in records:
             keywords = str(row["คีย์เวิร์ด"]).replace(" ", "").split(",")
             for kw in keywords:
@@ -80,25 +78,24 @@ def manychat():
                 max_tokens=400
             )
             reply_text = resp.choices[0].message.content.strip()
+
         else:
             reply_text = "คุณสนใจสินค้าไหนครับ 😊 เช่น ไฟเซ็นเซอร์ หม้อหุงข้าว หรือปลั๊กไฟ?"
 
-        # ✅ Return ในรูปแบบ ManyChat
+        # ✅ ส่งกลับแบบ ManyChat รองรับ
         return jsonify({
-            "version": "v2",
             "content": {
                 "messages": [
-                    {"type": "text", "text": reply_text}
+                    {"text": reply_text}
                 ]
             }
         }), 200
 
     except Exception as e:
         return jsonify({
-            "version": "v2",
             "content": {
                 "messages": [
-                    {"type": "text", "text": f"⚠️ เกิดข้อผิดพลาด: {str(e)}"}
+                    {"text": f"⚠️ มีข้อผิดพลาด: {str(e)}"}
                 ]
             }
         }), 200
