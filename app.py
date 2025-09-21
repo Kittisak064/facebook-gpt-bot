@@ -74,16 +74,25 @@ def manychat():
                 temperature=0.4,
                 max_tokens=400
             )
+                   if matched_keyword and faqs:
+            # ... (ตามที่คุณเขียนไว้)
             reply_text = resp.choices[0].message.content.strip()
-
         else:
-            # ถ้ายังจับคีย์เวิร์ดไม่ได้
             reply_text = "คุณสนใจสินค้าไหนครับ 😊 เช่น ไฟเซ็นเซอร์ หม้อหุงข้าว หรือปลั๊กไฟ?"
 
-        return jsonify({"reply": reply_text})
+        print("REPLY >>>", reply_text)  # debug log
+        return jsonify({
+            "success": True,
+            "reply": reply_text
+        }), 200
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print("ERROR >>>", str(e))
+        return jsonify({
+            "success": False,
+            "reply": "⚠️ มีข้อผิดพลาด กรุณาลองใหม่อีกครั้ง",
+            "error": str(e)
+        }), 200
 
 
 if __name__ == "__main__":
