@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from openai import OpenAI
+import openai
 import os
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -8,8 +8,9 @@ import re
 
 app = Flask(__name__)
 
-# ==== OpenAI Client ====
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ==== OpenAI Client (ใหม่) ====
+openai.api_key = os.getenv("OPENAI_API_KEY")
+
 
 # ==== Google Sheets ====
 scope = ["https://spreadsheets.google.com/feeds",
