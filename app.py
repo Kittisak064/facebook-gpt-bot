@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from openai import OpenAI
+import openai
 import os
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
@@ -9,7 +9,7 @@ import re
 app = Flask(__name__)
 
 # ==== OpenAI Client ====
-client = OpenAI()  # ไม่ต้องใส่ api_key ตรงนี้ เพราะ Render อ่านจาก ENV ให้แล้ว
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # ==== Google Sheets ====
 scope = ["https://spreadsheets.google.com/feeds",
@@ -17,9 +17,8 @@ scope = ["https://spreadsheets.google.com/feeds",
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 gs_client = gspread.authorize(creds)
 
-# ใช้ SHEET_ID จาก Environment Variable
 SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-sheet = gs_client.open_by_key(SHEET_ID).worksheet("FAQ")  # คอลัมน์: ชื่อสินค้า | คำตอบ | คีย์เวิร์ด
+sheet = gs_client.open_by_key(SHEET_ID).worksheet("FAQ")
 
 def _norm(s: str) -> str:
     return re.sub(r"\s+", "", str(s)).lower()
@@ -33,8 +32,8 @@ def _gpt_followup(user_message: str) -> str:
 - เน้นให้ลูกค้าสั่งซื้อผ่านลิ้งเท่านั้น ไม่อธิบายราคา/เก็บปลายทาง
 """
     try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+        resp = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "คุณคือพนักงานขายออนไลน์ พูดสุภาพ เป็นกันเอง และบอกให้สั่งผ่านลิ้ง"},
                 {"role": "user", "content": prompt}
@@ -42,7 +41,7 @@ def _gpt_followup(user_message: str) -> str:
             temperature=0.7,
             max_tokens=150
         )
-        return resp.choices[0].message.content.strip()
+        return resp["choices"][0]["message"]["content"].strip()
     except Exception:
         return "คุณสนใจสินค้าไหนครับ 😊 บอกชื่อสินค้าได้เลยครับ เดี๋ยวผมส่งลิ้งให้ครับ"
 
@@ -114,7 +113,7 @@ def manychat():
             "content": {"messages": [{"text": reply_text}]}
         }), 200
 
-    except Exception as e:
+    except Exception:
         return jsonify({
             "content": {"messages": [{"text": "⚠️ ระบบขัดข้องชั่วคราวครับ กำลังแก้ไข 🙏"}]}
         }), 200
