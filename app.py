@@ -1,16 +1,15 @@
 from flask import Flask, request, jsonify
-import openai
 import os
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 from difflib import SequenceMatcher
 import re
+import openai
 
 app = Flask(__name__)
 
-# ==== OpenAI Client (ใหม่) ====
+# ==== OpenAI Client ====
 openai.api_key = os.getenv("OPENAI_API_KEY")
-
 
 # ==== Google Sheets ====
 scope = ["https://spreadsheets.google.com/feeds",
@@ -18,47 +17,40 @@ scope = ["https://spreadsheets.google.com/feeds",
 creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
 gs_client = gspread.authorize(creds)
 
-# ใช้ SHEET_ID จาก Environment Variable
 SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
-sheet = gs_client.open_by_key(SHEET_ID).worksheet("FAQ")  # header: ชื่อสินค้า | คำตอบ | คีย์เวิร์ด
-
+sheet = gs_client.open_by_key(SHEET_ID).worksheet("FAQ")  # คอลัมน์: ชื่อสินค้า | คำตอบ | คีย์เวิร์ด
 
 def _norm(s: str) -> str:
-    """Normalize ข้อความ"""
     return re.sub(r"\s+", "", str(s)).lower()
 
-
-def _gpt_message(user_message: str, context: str) -> str:
-    """ให้ GPT ช่วยแต่งคำตอบสุภาพ"""
-    prompt = f"""
-ลูกค้าพิมพ์: "{user_message}"
-บริบท: {context}
-
-ตอบกลับสั้น ๆ 1-3 ประโยค
-- พูดสุภาพ เป็นกันเอง ใส่อีโมจิเล็กน้อย
-- ถ้าลูกค้าพยายามสั่ง/ถามราคา/เก็บปลายทาง → ย้ำว่าต้องสั่งซื้อผ่านลิ้งเท่านั้น
-- ถ้าเจอหลายสินค้า → สรุปรายการให้เลือก
-- ถ้าเจอ 1 สินค้า → ส่งลิ้งในคำตอบได้เลย
-"""
+def _gpt_polish(user_message: str, raw_reply: str) -> str:
+    """ให้ GPT ทำให้คำตอบสุภาพ/เป็นธรรมชาติ"""
     try:
-        resp = client.chat.completions.create(
+        prompt = f"""
+ลูกค้าพิมพ์: "{user_message}"
+ร่างคำตอบ: "{raw_reply}"
+
+หน้าที่ของคุณ:
+- ปรับร่างคำตอบให้สุภาพ อ่อนโยน เป็นกันเอง
+- เน้นให้ลูกค้าคลิกลิงก์สั่งซื้อเท่านั้น ไม่ต้องอธิบายรายละเอียดสินค้าเยอะ
+- ถ้าลูกค้าพยายามถามราคา, เก็บปลายทาง หรือสั่งในแชท → ให้ตอบสุภาพๆ ว่าต้องสั่งผ่านลิงก์เท่านั้น
+"""
+        resp = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "คุณคือพนักงานขายออนไลน์ ตอบสุภาพ เป็นกันเอง"},
+                {"role": "system", "content": "คุณคือพนักงานขายออนไลน์ สุภาพ เป็นกันเอง"},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.6,
             max_tokens=200
         )
-        return resp.choices[0].message.content.strip()
+        return resp.choices[0].message["content"].strip()
     except Exception:
-        return context  # fallback
-
+        return raw_reply
 
 @app.route("/", methods=["GET"])
 def home():
     return "✅ FAQ Bot is running with Google Sheets", 200
-
 
 @app.route("/manychat", methods=["POST"])
 def manychat():
@@ -74,17 +66,7 @@ def manychat():
         records = sheet.get_all_records()
         u = _norm(user_message)
 
-        # --- Step 1: ตรวจสอบว่า user พยายามสั่งตรง / ถามราคา / เก็บปลายทาง ---
-        trigger_words = ["สั่ง", "เก็บปลายทาง", "cod", "ราคา", "เท่า", "บาท"]
-        if any(t in user_message.lower() for t in trigger_words):
-            reply_text = _gpt_message(
-                user_message,
-                "ตอนนี้ลูกค้าพยายามสั่งซื้อหรือถามเรื่องราคาครับ ให้ตอบว่าสั่งซื้อได้ผ่านลิ้งเท่านั้น แล้วส่งลิ้งถ้ามีสินค้าเจอ"
-            )
-            return jsonify({"content": {"messages": [{"text": reply_text}]} }), 200
-
-        # --- Step 2: หาสินค้า match ---
-        candidates = []
+        candidates = []  # [{"name": str, "link": str, "score": float}]
         for row in records:
             name = str(row.get("ชื่อสินค้า", "")).strip()
             link = str(row.get("คำตอบ", "")).strip()
@@ -97,7 +79,7 @@ def manychat():
             for kw in kws_plus:
                 if not kw:
                     continue
-                if _norm(kw) in u:
+                if _norm(kw) in u or kw.lower() in user_message.lower():
                     direct_hit = True
                     best = 1.0
                     break
@@ -106,40 +88,44 @@ def manychat():
                     best = score
 
             if direct_hit or best >= 0.72:
-                candidates.append({"name": name, "link": link})
+                candidates.append({"name": name or "สินค้านี้", "link": link, "score": best})
 
-        # --- Step 3: ตัดสินใจตอบ ---
+        reply_text = ""
         if len(candidates) == 0:
-            # ไม่เจอสินค้าเลย → ชวนสุภาพ
-            reply_text = _gpt_message(user_message, "ลูกค้าไม่ได้พิมพ์ตรงกับสินค้า ให้ชวนบอกชื่อสินค้า")
-
+            reply_text = "คุณสนใจสินค้าไหนครับ 😊 บอกชื่อสินค้ามาได้เลย เดี๋ยวผมส่งลิงก์ให้ครับ"
         elif len(candidates) == 1:
-            # เจอชัดเจน
             c = candidates[0]
-            context = f"สินค้า {c['name']} สั่งซื้อได้ที่ลิ้ง {c['link']}"
-            reply_text = _gpt_message(user_message, context)
-
-        elif 2 <= len(candidates) <= 3:
-            # เจอ 2-3 ชิ้น → ส่งลิ้งทั้งหมด
-            items = "\n".join([f"- {c['name']} 👉 {c['link']}" for c in candidates])
-            context = f"พบหลายสินค้า:\n{items}"
-            reply_text = _gpt_message(user_message, context)
-
+            pname, link = c["name"], c["link"]
+            if link:
+                reply_text = f"ได้เลยครับ 🙌 สั่งซื้อ {pname} ได้ที่นี่ครับ 👉 {link}"
+            else:
+                reply_text = f"สนใจ {pname} ใช่ไหมครับ 😊 เดี๋ยวผมเช็กข้อมูลให้นะครับ"
+        elif 2 <= len(candidates) <= 4:
+            parts = []
+            for c in candidates:
+                pname, link = c["name"], c["link"]
+                if link:
+                    parts.append(f"👉 {pname}: {link}")
+            reply_text = "เจอสินค้าที่เกี่ยวข้องหลายรายการครับ 🙏\n" + "\n".join(parts)
         else:
-            # เจอเกิน 3 → ให้เลือก
-            names = "\n".join([f"- {c['name']}" for c in candidates[:5]])
-            context = f"สินค้าที่พบมีหลายรายการ:\n{names}\nให้ลูกค้าเลือก 1 ชิ้น"
-            reply_text = _gpt_message(user_message, context)
+            names = [c["name"] for c in sorted(candidates, key=lambda x: x["score"], reverse=True)[:5]]
+            bullet = "\n".join([f"- {n}" for n in names])
+            reply_text = (
+                "เกี่ยวกับคำนี้เรามีสินค้าหลายตัวเลยครับ 😊\n"
+                f"{bullet}\n\n"
+                "ช่วยพิมพ์ชื่อเต็มของสินค้าที่ต้องการ เดี๋ยวผมส่งลิงก์ให้ครับ 🙏"
+            )
+
+        polished = _gpt_polish(user_message, reply_text)
 
         return jsonify({
-            "content": {"messages": [{"text": reply_text}]}
+            "content": {"messages": [{"text": polished}]}
         }), 200
 
     except Exception as e:
         return jsonify({
             "content": {"messages": [{"text": f"⚠️ มีข้อผิดพลาด: {str(e)}"}]}
         }), 200
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
