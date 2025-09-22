@@ -1,6 +1,5 @@
-Flask
-gspread
-oauth2client
+flask==2.3.3
+gunicorn==21.2.0
+gspread==6.1.2
+oauth2client==4.1.3
 openai==0.28.0
-rapidfuzz
-gunicorn
