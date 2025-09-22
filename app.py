@@ -43,7 +43,7 @@ def _rewrite_with_gpt(user_message: str, base_reply: str) -> str:
 - สุภาพ เป็นกันเอง
 - ใส่อีโมจิเล็กน้อย
 - ย้ำว่ากดลิงก์เพื่อสั่งซื้อ/ดูรายละเอียด
-- ห้ามพิมพ์ {} []
+- ห้ามพิมพ์ {{}} []
 """
     try:
         resp = openai.ChatCompletion.create(
